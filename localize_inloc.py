@@ -8,7 +8,7 @@ from tqdm import tqdm
 import logging
 import pickle
 import cv2
-import pycolmap
+# import pycolmap
 
 from .utils.parsers import parse_retrieval, names_to_pair
 
