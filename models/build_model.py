@@ -5,6 +5,11 @@ from models.build_model_2d import AutoFeature, Disp
 from models.build_model_3d import AutoMatching
 import pdb
 from time import time
+from operations import *
+from collections import namedtuple
+
+Genotype = namedtuple('Genotype_2D', 'cell cell_concat')
+
 
 # 最上层模型，定义feature网络和matching网络相关参数
 class AutoStereo(nn.Module):
