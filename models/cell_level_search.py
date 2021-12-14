@@ -83,7 +83,7 @@ class Cell(nn.Module):
     def scale_dimension(self, dim, scale):
         assert isinstance(dim, int)
         return int((float(dim) - 1.0) * scale + 1.0) if dim % 2 else int(dim * scale)
-
+    # 切换不同分辨率
     def prev_feature_resize(self, prev_feature, mode):
         if mode == 'down':
             feature_size_h = self.scale_dimension(prev_feature.shape[2], 0.5)
@@ -92,10 +92,11 @@ class Cell(nn.Module):
             feature_size_h = self.scale_dimension(prev_feature.shape[2], 2)
             feature_size_w = self.scale_dimension(prev_feature.shape[3], 2)
 
+        # 使用interpolate函数转换输出feat到输出h w
         return F.interpolate(prev_feature, (feature_size_h, feature_size_w), mode='bilinear', align_corners=True)
 
     def forward(self, s0, s1_down, s1_same, s1_up, n_alphas):
-
+        # 每个Cell的三个输入，up same down，注意u s d并不是同时输入一个forward函数
         if s1_down is not None:
             s1_down = self.prev_feature_resize(s1_down, 'down')
             s1_down = self.preprocess_down(s1_down)
@@ -108,6 +109,7 @@ class Cell(nn.Module):
             s1_up = self.preprocess_up(s1_up)
             size_h, size_w = s1_up.shape[2], s1_up.shape[3]
         all_states = []
+        # s0是prev_prev
         if s0 is not None:
 
             s0 = F.interpolate(s0, (size_h, size_w), mode='bilinear', align_corners=True) if (s0.shape[2] != size_h) or (s0.shape[3] != size_w) else s0
