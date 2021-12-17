@@ -111,7 +111,6 @@ class Cell(nn.Module):
         all_states = []
         # s0是prev_prev
         if s0 is not None:
-
             s0 = F.interpolate(s0, (size_h, size_w), mode='bilinear', align_corners=True) if (s0.shape[2] != size_h) or (s0.shape[3] != size_w) else s0
             s0 = self.pre_preprocess(s0) if (s0.shape[1] != self.C_out) else s0
             if s1_down is not None:
@@ -123,7 +122,7 @@ class Cell(nn.Module):
             if s1_up is not None:
                 states_up = [s0, s1_up]
                 all_states.append(states_up)
-        else:
+        else:# 没有prev_prev也就是 s0的话第一个输入节点就留着0
             if s1_down is not None:
                 states_down = [0, s1_down]
                 all_states.append(states_down)
