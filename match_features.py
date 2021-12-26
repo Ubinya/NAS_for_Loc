@@ -8,7 +8,7 @@ from tqdm import tqdm
 import h5py
 import torch
 
-from . import matchers
+from .models import matcher
 from .utils.base_model import dynamic_load
 from .utils.parsers import names_to_pair, parse_retrieval
 from .utils.io import list_h5_names
@@ -121,7 +121,7 @@ def match_from_paths(conf: Dict, pairs_path: Path, match_path: Path,
             f.write('\n'.join(' '.join((n1, n2)) for n1, n2 in pairs))
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    Model = dynamic_load(matchers, conf['model']['name'])
+    Model = dynamic_load(matcher, conf['model']['name'])
     model = Model(conf['model']).eval().to(device)
 
     match_path.parent.mkdir(exist_ok=True, parents=True)
