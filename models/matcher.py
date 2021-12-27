@@ -88,6 +88,9 @@ class MatcherSearch(BaseModel):
     def __init__(self, conf):
 
     def forward(self, data):
+        """a pair of keypoints and descriptors"""
+        desc0, desc1 = data['descriptors0'], data['descriptors1']
+        kpts0, kpts1 = data['keypoints0'], data['keypoints1']
 
         #--------------follow from SuperGlue matcher------------
         # Final MLP projection.
