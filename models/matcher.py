@@ -3,9 +3,7 @@ import torch
 from utils.base_model import BaseModel
 import torch.nn as nn
 import torch.nn.functional as F
-import  models.cell_level_search
-from models.cell_level_search import PRIMITIVES
-import cell_level_search
+from pathlib import Path
 from models.operations import *
 from models.decoding_formulas import Decoder
 import pdb
@@ -60,9 +58,38 @@ class NearestNeighbor(BaseModel):
         }
 
 
-class NASMatcher(BaseModel):
-    default_conf = {
-        'weights': 'outdoor',
+def MLP(channels: list, do_bn=True):
+    """ Multi-layer perceptron """
+    n = len(channels)
+    layers = []
+    for i in range(1, n):
+        layers.append(
+            nn.Conv1d(channels[i - 1], channels[i], kernel_size=1, bias=True))
+        if i < (n-1):
+            if do_bn:
+                layers.append(nn.BatchNorm1d(channels[i]))
+            layers.append(nn.ReLU())
+    return nn.Sequential(*layers)
+
+
+class KeypointEncoder(nn.Module):
+    """ Joint encoding of visual appearance and location using MLPs"""
+    def __init__(self, feature_dim, layers):
+        super().__init__()
+        self.encoder = MLP([3] + layers + [feature_dim])
+        nn.init.constant_(self.encoder[-1].bias, 0.0)
+
+    def forward(self, kpts, scores):
+        inputs = [kpts.transpose(1, 2), scores.unsqueeze(1)]
+        return self.encoder(torch.cat(inputs, dim=1))
+
+
+class AutoClue(nn.Module):
+    default_config = {
+        'descriptor_dim': 256,
+        'weights': 'indoor',
+        'keypoint_encoder': [32, 64, 128, 256],
+        'GNN_layers': ['self', 'cross'] * 9,
         'sinkhorn_iterations': 100,
         'match_threshold': 0.2,
     }
@@ -71,14 +98,35 @@ class NASMatcher(BaseModel):
         'image1', 'keypoints1', 'scores1', 'descriptors1',
     ]
 
-    def _init(self, conf):
-        self.net = MatcherSearch(conf)
+    def _init(self, config):
+        super().__init__()
+        self.config = {**self.default_config, **config}
+
+        self.kenc = KeypointEncoder(
+            self.config['descriptor_dim'], self.config['keypoint_encoder'])
+
+        self.gnn = AutoAttention(
+            self.config['descriptor_dim'], self.config['GNN_layers'])
+
+        self.final_proj = nn.Conv1d(
+            self.config['descriptor_dim'], self.config['descriptor_dim'],
+            kernel_size=1, bias=True)
+
+        bin_score = torch.nn.Parameter(torch.tensor(1.))
+        self.register_parameter('bin_score', bin_score)
+
+        assert self.config['weights'] in ['indoor', 'outdoor']
+        path = Path(__file__).parent
+        path = path / 'weights/superglue_{}.pth'.format(self.config['weights'])
+        self.load_state_dict(torch.load(path))
+        print('Loaded SuperGlue model (\"{}\" weights)'.format(
+            self.config['weights']))
 
     def _forward(self, data):
         return self.net(data)
 
 
-class MatcherSearch(BaseModel):
+class AutoAttention(BaseModel):
     default_config = {
         'descriptor_dim': 256,
         'weights': 'indoor',
@@ -215,258 +263,7 @@ class MatcherSearch(BaseModel):
 
     def forward(self, x):
         #------------follow from build_model_2d---------------
-        self.level_3 = []
-        self.level_6 = []
-        self.level_12 = []
-        self.level_24 = []
 
-        stem0 = self.stem0(x)
-        stem1 = self.stem1(stem0)
-        stem2 = self.stem2(stem1)
-
-        self.level_3.append(stem2)
-
-        count = 0
-        normalized_betas = torch.randn(self._num_layers, 4, 3).cuda()
-        # Softmax on alphas and betas
-        if torch.cuda.device_count() > 1:
-            # print('more than 1 gpu used!')
-            img_device = torch.device('cuda', x.get_device())
-            normalized_alphas = F.softmax(self.alphas.to(device=img_device), dim=-1)
-
-            # normalized_betas[layer][ith node][0 : ➚, 1: ➙, 2 : ➘]
-            for layer in range(len(self.betas)):
-                if layer == 0:
-                    normalized_betas[layer][0][1:] = F.softmax(self.betas[layer][0][1:].to(device=img_device),
-                                                               dim=-1) * (2 / 3)
-
-                elif layer == 1:
-                    normalized_betas[layer][0][1:] = F.softmax(self.betas[layer][0][1:].to(device=img_device),
-                                                               dim=-1) * (2 / 3)
-                    normalized_betas[layer][1] = F.softmax(self.betas[layer][1].to(device=img_device), dim=-1)
-
-                elif layer == 2:
-                    normalized_betas[layer][0][1:] = F.softmax(self.betas[layer][0][1:].to(device=img_device),
-                                                               dim=-1) * (2 / 3)
-                    normalized_betas[layer][1] = F.softmax(self.betas[layer][1].to(device=img_device), dim=-1)
-                    normalized_betas[layer][2] = F.softmax(self.betas[layer][2].to(device=img_device), dim=-1)
-                else:
-                    normalized_betas[layer][0][1:] = F.softmax(self.betas[layer][0][1:].to(device=img_device),
-                                                               dim=-1) * (2 / 3)
-                    normalized_betas[layer][1] = F.softmax(self.betas[layer][1].to(device=img_device), dim=-1)
-                    normalized_betas[layer][2] = F.softmax(self.betas[layer][2].to(device=img_device), dim=-1)
-                    normalized_betas[layer][3][:2] = F.softmax(self.betas[layer][3][:1].to(device=img_device),
-                                                               dim=-1) * (2 / 3)
-
-        else:
-            normalized_alphas = F.softmax(self.alphas, dim=-1)
-
-            for layer in range(len(self.betas)):
-                if layer == 0:
-                    normalized_betas[layer][0][1:] = F.softmax(self.betas[layer][0][1:], dim=-1) * (2 / 3)
-
-                elif layer == 1:
-                    normalized_betas[layer][0][1:] = F.softmax(self.betas[layer][0][1:], dim=-1) * (2 / 3)
-                    normalized_betas[layer][1] = F.softmax(self.betas[layer][1], dim=-1)
-
-                elif layer == 2:
-                    normalized_betas[layer][0][1:] = F.softmax(self.betas[layer][0][1:], dim=-1) * (2 / 3)
-                    normalized_betas[layer][1] = F.softmax(self.betas[layer][1], dim=-1)
-                    normalized_betas[layer][2] = F.softmax(self.betas[layer][2], dim=-1)
-                else:
-                    normalized_betas[layer][0][1:] = F.softmax(self.betas[layer][0][1:], dim=-1) * (2 / 3)
-                    normalized_betas[layer][1] = F.softmax(self.betas[layer][1], dim=-1)
-                    normalized_betas[layer][2] = F.softmax(self.betas[layer][2], dim=-1)
-                    normalized_betas[layer][3][:2] = F.softmax(self.betas[layer][3][:2], dim=-1) * (2 / 3)
-
-        for layer in range(self._num_layers):
-
-            if layer == 0:
-                level3_new, = self.cells[count](None, None, self.level_3[-1], None, normalized_alphas)
-                count += 1
-                level6_new, = self.cells[count](None, self.level_3[-1], None, None, normalized_alphas)
-                count += 1
-
-                level3_new = normalized_betas[layer][0][1] * level3_new
-                level6_new = normalized_betas[layer][0][2] * level6_new
-                self.level_3.append(level3_new)
-                self.level_6.append(level6_new)
-
-            elif layer == 1:
-                level3_new_1, level3_new_2 = self.cells[count](self.level_3[-2],
-                                                               None,
-                                                               self.level_3[-1],
-                                                               self.level_6[-1],
-                                                               normalized_alphas)
-                count += 1
-                level3_new = normalized_betas[layer][0][1] * level3_new_1 + normalized_betas[layer][1][0] * level3_new_2
-
-                level6_new_1, level6_new_2 = self.cells[count](None,
-                                                               self.level_3[-1],
-                                                               self.level_6[-1],
-                                                               None,
-                                                               normalized_alphas)
-                count += 1
-                level6_new = normalized_betas[layer][0][2] * level6_new_1 + normalized_betas[layer][1][2] * level6_new_2
-
-                level12_new, = self.cells[count](None,
-                                                 self.level_6[-1],
-                                                 None,
-                                                 None,
-                                                 normalized_alphas)
-                level12_new = normalized_betas[layer][1][2] * level12_new
-                count += 1
-
-                self.level_3.append(level3_new)
-                self.level_6.append(level6_new)
-                self.level_12.append(level12_new)
-
-            elif layer == 2:
-                level3_new_1, level3_new_2 = self.cells[count](self.level_3[-2],
-                                                               None,
-                                                               self.level_3[-1],
-                                                               self.level_6[-1],
-                                                               normalized_alphas)
-                count += 1
-                level3_new = normalized_betas[layer][0][1] * level3_new_1 + normalized_betas[layer][1][0] * level3_new_2
-
-                level6_new_1, level6_new_2, level6_new_3 = self.cells[count](self.level_6[-2],
-                                                                             self.level_3[-1],
-                                                                             self.level_6[-1],
-                                                                             self.level_12[-1],
-                                                                             normalized_alphas)
-                count += 1
-                level6_new = normalized_betas[layer][0][2] * level6_new_1 + normalized_betas[layer][1][
-                    1] * level6_new_2 + normalized_betas[layer][2][
-                                 0] * level6_new_3
-
-                level12_new_1, level12_new_2 = self.cells[count](None,
-                                                                 self.level_6[-1],
-                                                                 self.level_12[-1],
-                                                                 None,
-                                                                 normalized_alphas)
-                count += 1
-                level12_new = normalized_betas[layer][1][2] * level12_new_1 + normalized_betas[layer][2][
-                    1] * level12_new_2
-
-                level24_new, = self.cells[count](None,
-                                                 self.level_12[-1],
-                                                 None,
-                                                 None,
-                                                 normalized_alphas)
-                level24_new = normalized_betas[layer][2][2] * level24_new
-                count += 1
-
-                self.level_3.append(level3_new)
-                self.level_6.append(level6_new)
-                self.level_12.append(level12_new)
-                self.level_24.append(level24_new)
-
-            elif layer == 3:
-                level3_new_1, level3_new_2 = self.cells[count](self.level_3[-2],
-                                                               None,
-                                                               self.level_3[-1],
-                                                               self.level_6[-1],
-                                                               normalized_alphas)
-                count += 1
-                level3_new = normalized_betas[layer][0][1] * level3_new_1 + normalized_betas[layer][1][0] * level3_new_2
-
-                level6_new_1, level6_new_2, level6_new_3 = self.cells[count](self.level_6[-2],
-                                                                             self.level_3[-1],
-                                                                             self.level_6[-1],
-                                                                             self.level_12[-1],
-                                                                             normalized_alphas)
-                count += 1
-                level6_new = normalized_betas[layer][0][2] * level6_new_1 + normalized_betas[layer][1][
-                    1] * level6_new_2 + normalized_betas[layer][2][
-                                 0] * level6_new_3
-
-                level12_new_1, level12_new_2, level12_new_3 = self.cells[count](self.level_12[-2],
-                                                                                self.level_6[-1],
-                                                                                self.level_12[-1],
-                                                                                self.level_24[-1],
-                                                                                normalized_alphas)
-                count += 1
-                level12_new = normalized_betas[layer][1][2] * level12_new_1 + normalized_betas[layer][2][
-                    1] * level12_new_2 + normalized_betas[layer][3][
-                                  0] * level12_new_3
-
-                level24_new_1, level24_new_2 = self.cells[count](None,
-                                                                 self.level_12[-1],
-                                                                 self.level_24[-1],
-                                                                 None,
-                                                                 normalized_alphas)
-                count += 1
-                level24_new = normalized_betas[layer][2][2] * level24_new_1 + normalized_betas[layer][3][
-                    1] * level24_new_2
-
-                self.level_3.append(level3_new)
-                self.level_6.append(level6_new)
-                self.level_12.append(level12_new)
-                self.level_24.append(level24_new)
-
-            else:
-                level3_new_1, level3_new_2 = self.cells[count](self.level_3[-2],
-                                                               None,
-                                                               self.level_3[-1],
-                                                               self.level_6[-1],
-                                                               normalized_alphas)
-                count += 1
-                level3_new = normalized_betas[layer][0][1] * level3_new_1 + normalized_betas[layer][1][0] * level3_new_2
-
-                level6_new_1, level6_new_2, level6_new_3 = self.cells[count](self.level_6[-2],
-                                                                             self.level_3[-1],
-                                                                             self.level_6[-1],
-                                                                             self.level_12[-1],
-                                                                             normalized_alphas)
-                count += 1
-
-                level6_new = normalized_betas[layer][0][2] * level6_new_1 + normalized_betas[layer][1][
-                    1] * level6_new_2 + normalized_betas[layer][2][
-                                 0] * level6_new_3
-
-                level12_new_1, level12_new_2, level12_new_3 = self.cells[count](self.level_12[-2],
-                                                                                self.level_6[-1],
-                                                                                self.level_12[-1],
-                                                                                self.level_24[-1],
-                                                                                normalized_alphas)
-                count += 1
-                level12_new = normalized_betas[layer][1][2] * level12_new_1 + normalized_betas[layer][2][
-                    1] * level12_new_2 + normalized_betas[layer][3][
-                                  0] * level12_new_3
-
-                level24_new_1, level24_new_2 = self.cells[count](self.level_24[-2],
-                                                                 self.level_12[-1],
-                                                                 self.level_24[-1],
-                                                                 None,
-                                                                 normalized_alphas)
-                count += 1
-                level24_new = normalized_betas[layer][2][2] * level24_new_1 + normalized_betas[layer][3][
-                    1] * level24_new_2
-
-                self.level_3.append(level3_new)
-                self.level_6.append(level6_new)
-                self.level_12.append(level12_new)
-                self.level_24.append(level24_new)
-
-            self.level_3 = self.level_3[-2:]
-            self.level_6 = self.level_6[-2:]
-            self.level_12 = self.level_12[-2:]
-            self.level_24 = self.level_24[-2:]
-
-        # define upsampling
-        h, w = stem2.size()[2], stem2.size()[3]
-        upsample_6 = nn.Upsample(size=stem2.size()[2:], mode='bilinear', align_corners=True)
-        upsample_12 = nn.Upsample(size=[h // 2, w // 2], mode='bilinear', align_corners=True)
-        upsample_24 = nn.Upsample(size=[h // 4, w // 4], mode='bilinear', align_corners=True)
-
-        result_3 = self.last_3(self.level_3[-1])
-        result_6 = self.last_3(upsample_6(self.last_6(self.level_6[-1])))
-        result_12 = self.last_3(upsample_6(self.last_6(upsample_12(self.last_12(self.level_12[-1])))))
-        result_24 = self.last_3(upsample_6(self.last_6(upsample_12(self.last_12(self.last_24(self.level_24[-1]))))))
-
-        sum_feature_map = result_3 + result_6 + result_12 + result_24
-        return sum_feature_map
 
         # --------------follow from SuperGlue matcher------------
         """a pair of keypoints and descriptors"""
